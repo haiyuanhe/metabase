@@ -172,7 +172,7 @@
                          (for [[k v] merged-params
                                :when (and (string? (name k))
                                          (str/starts-with? (name k) rls-prefix))]
-                           [(keyword (subs (name k) (count rls-prefix))) v]))]
+                           [(keyword (str/replace (subs (name k) (count rls-prefix)) #"-" "_")) v]))]
     rls-params))
 
 (defn- validate-rls-params

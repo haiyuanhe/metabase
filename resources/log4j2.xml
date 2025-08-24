@@ -30,6 +30,14 @@
     <Logger name="metabase.plugins" level="DEBUG"/>
     <Logger name="metabase.query-processor.async" level="DEBUG"/>
     <Logger name="metabase.server.middleware" level="DEBUG"/>
+    <!-- PostgreSQL SQL debugging -->
+    <Logger name="metabase.driver.postgres" level="DEBUG"/>
+    <Logger name="metabase.driver.sql-jdbc.execute" level="DEBUG"/>
+    <Logger name="metabase.query-processor.middleware.rls" level="DEBUG"/>
+    <!-- JDBC SQL logging -->
+    <Logger name="java.sql" level="DEBUG"/>
+    <Logger name="java.sql.Connection" level="DEBUG"/>
+    <Logger name="java.sql.Statement" level="DEBUG"/>
     <Logger name="org.quartz" level="INFO"/>
     <Logger name="net.snowflake.client.jdbc.SnowflakeConnectString" level="ERROR"/>
     <Logger name="net.snowflake.client.core.SessionUtil" level="FATAL"/>

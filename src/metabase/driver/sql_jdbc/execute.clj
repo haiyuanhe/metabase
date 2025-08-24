@@ -49,6 +49,33 @@
 (set! *warn-on-reflection* true)
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
+;;; |                                              RLS Support                                                        |
+;;; +----------------------------------------------------------------------------------------------------------------+
+
+(defn- set-rls-params-if-available
+  "Set RLS parameters on the connection if they are available in the query context."
+  [driver ^Connection conn database query]
+  (when-let [rls-params (:qp/rls-params query)]
+    (try
+      (log/debugf "Setting RLS session variables for database %s: %s" (:name database) (pr-str rls-params))
+      (doseq [[param-name param-value] rls-params]
+        (let [var-name (str "metabase.rls." (str/replace (name param-name) #"^rls_" ""))
+              sql (format "SET SESSION %s = %s;"
+                          var-name
+                          (if (string? param-value)
+                            (format "'%s'" (str/replace param-value #"'" "''"))
+                            (str param-value)))]
+          (log/debugf "Executing RLS SQL: %s" sql)
+          (with-open [stmt (.createStatement conn)]
+            (.execute stmt sql))))
+      (log/debugf "Successfully set %d RLS session variables" (count rls-params))
+      (catch Throwable e
+        (log/errorf e "Failed to set RLS session variables: %s" (pr-str rls-params))
+        (throw (ex-info (tru "Failed to set RLS session variables")
+                        {:rls-params rls-params}
+                        e))))))
+
+;;; +----------------------------------------------------------------------------------------------------------------+
 ;;; |                                        SQL JDBC Reducible QP Interface                                         |
 ;;; +----------------------------------------------------------------------------------------------------------------+
 
@@ -380,7 +407,7 @@
       (when-let [rls-params (:qp/rls-params query)]
         (try
           (doseq [[param-name param-value] rls-params]
-            (let [var-name (str "metabase.rls." (name param-name))
+            (let [var-name (str "metabase.rls." (str/replace (str/replace (name param-name) #"^rls_" "") #"-" "_"))
                   sql (format "SET SESSION %s = %s;" 
                               var-name 
                               (if (string? param-value)
@@ -795,9 +822,12 @@
      driver
      (driver-api/database (driver-api/metadata-provider))
      {:session-timezone (driver-api/report-timezone-id-if-supported driver (driver-api/database (driver-api/metadata-provider)))
-      :download? (download? (-> outer-query :info :context))}
+      :download? (download? (-> outer-query :info :context))
+      :query outer-query}
      (fn [^Connection conn]
-       (with-open [stmt          (statement-or-prepared-statement driver conn sql params (driver-api/canceled-chan))
+       ;; Clean up RLS params after they've been used for connection setup
+       (let [query-without-rls (dissoc outer-query :qp/rls-params)]
+         (with-open [stmt          (statement-or-prepared-statement driver conn sql params (driver-api/canceled-chan))
                    ^ResultSet rs (try
                                    (execute-statement-or-prepared-statement! driver stmt max-rows params sql)
                                    (catch Throwable e
@@ -824,7 +854,7 @@
                            (log/warnf "Statemet's `.cancel` method is not supported by the `%s` driver."
                                       (name driver)))
                          (catch Throwable _
-                           (log/warn "Statement cancelation failed."))))))))))))
+                           (log/warn "Statement cancelation failed.")))))))))))))
 
 (defn reducible-query
   "Returns a reducible collection of rows as maps from `db` and a given SQL query. This is similar to [[jdbc/reducible-query]] but reuses the

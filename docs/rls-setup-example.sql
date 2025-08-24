@@ -126,3 +126,34 @@ ALTER VIEW sales_data_view SET (security_barrier = true);
 -- DROP POLICY IF EXISTS sales_data_access_policy ON sales_data;
 -- DROP POLICY IF EXISTS sales_data_advanced_policy ON sales_data;
 -- DROP TABLE IF EXISTS sales_data;
+
+-- Example PostgreSQL function that matches our parameter naming convention
+-- Our code sets: metabase.rls.user_id, metabase.rls.org_id, etc.
+
+CREATE OR REPLACE FUNCTION get_current_user_id()
+RETURNS uuid AS $$
+BEGIN
+  RETURN(SELECT (
+    coalesce(
+      nullif(current_setting('metabase.rls.user_id', true), ''),  -- 使用 user_id
+      coalesce(
+        nullif(current_setting('request.jwt.claim.sub', true), ''),
+        (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
+      )
+    )
+  )::uuid);
+END;
+$$ LANGUAGE plpgsql;
+
+-- Alternative function for organization ID
+CREATE OR REPLACE FUNCTION get_current_org_id()
+RETURNS integer AS $$
+BEGIN
+  RETURN(SELECT (
+    coalesce(
+      nullif(current_setting('metabase.rls.org_id', true), '')::integer,  -- 使用 org_id
+      0
+    )
+  ));
+END;
+$$ LANGUAGE plpgsql;

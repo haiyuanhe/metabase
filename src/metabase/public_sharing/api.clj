@@ -143,7 +143,7 @@
   [card-id :- ::lib.schema.id/card
    export-format
    parameters
-   & {:keys [qp]
+   & {:keys [qp rls-params]
       :or   {qp qp.card/process-query-for-card-default-qp}
       :as   options}]
   ;; run this query with full superuser perms
@@ -157,6 +157,7 @@
               :context    (export-format->context export-format)
               :qp         qp
               :make-run   process-query-for-card-with-id-run-fn
+              :rls-params rls-params
               options)))
 
 (defn ^:private process-query-for-card-with-public-uuid
@@ -263,7 +264,7 @@
 
   Throws a 404 immediately if the Card isn't part of the Dashboard. Returns a `StreamingResponse`."
   {:arglists '([& {:keys [dashboard-id card-id dashcard-id export-format parameters] :as options}])}
-  [& {:keys [export-format parameters qp]
+  [& {:keys [export-format parameters qp rls-params]
       :or   {qp            qp.card/process-query-for-card-default-qp
              export-format :api}
       :as   options}]
@@ -275,6 +276,7 @@
                                    (string? parameters) json/decode+kw)
                   :export-format export-format
                   :qp            qp
+                  :rls-params    rls-params
                   :make-run      process-query-for-card-with-id-run-fn})]
     ;; Run this query with full superuser perms. We don't want the various perms checks failing because there are no
     ;; current user perms; if this Dashcard is public you're by definition allowed to run it without a perms check

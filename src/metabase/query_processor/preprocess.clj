@@ -32,15 +32,16 @@
    [metabase.query-processor.middleware.optimize-temporal-filters :as optimize-temporal-filters]
    [metabase.query-processor.middleware.parameters :as parameters]
    [metabase.query-processor.middleware.permissions :as qp.perms]
+   [metabase.query-processor.middleware.resolve-joins :as resolve-joins]
+   [metabase.query-processor.middleware.resolve-referenced :as qp.resolve-referenced]
+   [metabase.query-processor.middleware.resolve-source-table :as qp.resolve-source-table]
+   [metabase.query-processor.middleware.rls :as qp.rls]
    [metabase.query-processor.middleware.persistence :as qp.persistence]
    [metabase.query-processor.middleware.pre-alias-aggregations :as qp.pre-alias-aggregations]
    [metabase.query-processor.middleware.reconcile-breakout-and-order-by-bucketing :as reconcile-bucketing]
    [metabase.query-processor.middleware.remove-inactive-field-refs :as qp.remove-inactive-field-refs]
    [metabase.query-processor.middleware.resolve-fields :as qp.resolve-fields]
    [metabase.query-processor.middleware.resolve-joined-fields :as resolve-joined-fields]
-   [metabase.query-processor.middleware.resolve-joins :as resolve-joins]
-   [metabase.query-processor.middleware.resolve-referenced :as qp.resolve-referenced]
-   [metabase.query-processor.middleware.resolve-source-table :as qp.resolve-source-table]
    [metabase.query-processor.middleware.validate :as validate]
    [metabase.query-processor.middleware.validate-temporal-bucketing :as validate-temporal-bucketing]
    [metabase.query-processor.middleware.wrap-value-literals :as qp.wrap-value-literals]
@@ -137,6 +138,7 @@
    (ensure-mbql5 #'expand-macros/expand-macros)
    (ensure-mbql5 #'qp.resolve-referenced/resolve-referenced-card-resources)
    (ensure-mbql5 #'parameters/substitute-parameters)
+   (ensure-mbql5 #'qp.rls/apply-rls)
    (ensure-mbql5 #'qp.resolve-source-table/resolve-source-tables)
    (ensure-mbql5 #'qp.auto-bucket-datetimes/auto-bucket-datetimes)
    (ensure-mbql5 #'ensure-joins-use-source-query/ensure-joins-use-source-query)

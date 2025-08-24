@@ -114,8 +114,13 @@
    slug->value  :- :map]
   (let [parameters (t2/select-one-fn :parameters :model/Dashboard :id dashboard-id)
         slug->id (into {} (map (juxt :slug :id)) parameters)
-        slug->type (into {} (map (juxt :slug :type)) parameters)]
-    (vec (for [[slug value] slug->value
+        slug->type (into {} (map (juxt :slug :type)) parameters)
+        ;; Filter out RLS parameters from the mapping process
+        rls-prefix "rls_"
+        is-rls-param? (fn [k] (and (string? (name k))
+                                   (str/starts-with? (name k) rls-prefix)))
+        non-rls-slug->value (m/filter-keys (complement is-rls-param?) slug->value)]
+    (vec (for [[slug value] non-rls-slug->value
                :let [slug (u/qualified-name slug)
                      param-type (get slug->type slug)
                      default-options (parameters.dashboard/param-type->default-options param-type)]]
@@ -156,24 +161,60 @@
       (update-keys keyword)
       (update-vals (fn [v] (if (= v "") nil v)))))
 
+;;; ---------------------------------------------- RLS Parameter Support ----------------------------------------------
+
+(defn- extract-rls-params
+  "Extract RLS-related parameters from the merged parameters map.
+  These parameters will be used to set session variables in PostgreSQL for RLS policies."
+  [merged-params]
+  (let [rls-prefix "rls_"
+        rls-params (into {}
+                         (for [[k v] merged-params
+                               :when (and (string? (name k))
+                                         (str/starts-with? (name k) rls-prefix))]
+                           [(keyword (subs (name k) (count rls-prefix))) v]))]
+    rls-params))
+
+(defn- validate-rls-params
+  "Validate that RLS parameters are properly formatted and contain required values."
+  [rls-params]
+  (doseq [[k v] rls-params]
+    (when (or (nil? v) (and (string? v) (str/blank? v)))
+      (throw (ex-info (tru "RLS parameter {0} cannot be empty" (name k))
+                      {:status-code 400
+                       :parameter k}))))
+  rls-params)
+
+;;; ---------------------------------------------- Enhanced Parameter Processing ----------------------------------------------
+
 (mu/defn validate-and-merge-params :- [:map-of :keyword :any]
   "Validate that the `token-params` passed in the JWT and the `user-params` (passed as part of the URL) are allowed, and
   that ones that are required are specified by checking them against a Card or Dashboard's `object-embedding-params`
   (the object's value of `:embedding_params`). Throws a 400 if any of the checks fail. If all checks are successful,
-  returns a *merged* parameters map."
+  returns a *merged* parameters map with RLS parameters extracted."
   [object-embedding-params :- ms/EmbeddingParams
    token-params            :- [:map-of :keyword :any]
    user-params             :- [:map-of :keyword :any]]
-  (check-param-sets object-embedding-params
-                    (m/filter-vals valid-param-value? token-params)
-                    (m/filter-vals valid-param-value? user-params))
+  ;; Filter out RLS parameters before validation, as they are handled separately
+  (let [rls-prefix "rls_"
+        is-rls-param? (fn [k] (and (string? (name k))
+                                   (str/starts-with? (name k) rls-prefix)))
+        non-rls-token-params (m/filter-keys (complement is-rls-param?) token-params)
+        non-rls-user-params (m/filter-keys (complement is-rls-param?) user-params)]
+    (check-param-sets object-embedding-params
+                      (m/filter-vals valid-param-value? non-rls-token-params)
+                      (m/filter-vals valid-param-value? non-rls-user-params)))
   ;; ok, everything checks out, now return the merged params map,
   ;; but first turn empty lists into nil
-  (-> (merge user-params token-params)
-      (update-vals (fn [v]
-                     (if (and (not (string? v)) (seqable? v))
-                       (not-empty v)
-                       v)))))
+  (let [merged-params (-> (merge user-params token-params)
+                          (update-vals (fn [v]
+                                         (if (and (not (string? v)) (seqable? v))
+                                           (not-empty v)
+                                           v))))
+        rls-params (extract-rls-params merged-params)]
+    (when (seq rls-params)
+      (validate-rls-params rls-params))
+    (assoc merged-params :rls-params rls-params)))
 
 (mu/defn- param-values-merged-params :- [:map-of ms/NonBlankString :any]
   [id->slug slug->id embedding-params token-params id-query-params]
@@ -187,8 +228,13 @@
                                                          :id-query-params id-query-params})))
                                     v]))
         slug-query-params  (normalize-query-params slug-query-params)
-        merged-slug->value (validate-and-merge-params embedding-params token-params slug-query-params)]
-    (into {} (for [[slug value] merged-slug->value
+        merged-slug->value (validate-and-merge-params embedding-params token-params slug-query-params)
+        ;; Filter out RLS parameters from the mapping process
+        rls-prefix "rls_"
+        is-rls-param? (fn [k] (and (string? (name k))
+                                   (str/starts-with? (name k) rls-prefix)))
+        non-rls-merged-slug->value (m/filter-keys (complement is-rls-param?) merged-slug->value)]
+    (into {} (for [[slug value] non-rls-merged-slug->value
                    :when        value]
                [(get slug->id (name slug)) value]))))
 
@@ -306,12 +352,14 @@
       :or   {qp qp.card/process-query-for-card-default-qp}}]
   {:pre [(integer? card-id) (u/maybe? map? embedding-params) (map? token-params) (map? query-params)]}
   (let [merged-slug->value (validate-and-merge-params embedding-params token-params (normalize-query-params query-params))
-        parameters         (apply-slug->value (resolve-card-parameters card-id) merged-slug->value)]
+        rls-params (:rls-params merged-slug->value)
+        parameters (apply-slug->value (resolve-card-parameters card-id) (dissoc merged-slug->value :rls-params))]
     (m/mapply api.public/process-query-for-card-with-id
               card-id export-format parameters
               :context     :embedded-question
               :constraints constraints
               :qp          qp
+              :rls-params  rls-params
               options)))
 
 ;;; -------------------------- Dashboard Fns used by both /api/embed and /api/preview_embed --------------------------
@@ -378,7 +426,8 @@
   {:pre [(integer? dashboard-id) (integer? dashcard-id) (integer? card-id) (u/maybe? map? embedding-params)
          (map? token-params) (map? query-params)]}
   (let [slug->value (validate-and-merge-params embedding-params token-params (normalize-query-params query-params))
-        parameters  (resolve-dashboard-parameters dashboard-id slug->value)]
+        rls-params (:rls-params slug->value)
+        parameters (resolve-dashboard-parameters dashboard-id (dissoc slug->value :rls-params))]
     (api.public/process-query-for-dashcard
      :dashboard-id  dashboard-id
      :card-id       card-id
@@ -388,7 +437,8 @@
      :qp            qp
      :context       (get-embed-dashboard-context export-format)
      :constraints   constraints
-     :middleware    middleware)))
+     :middleware    middleware
+     :rls-params    rls-params)))
 
 (defn card-param-values
   "Search for card parameter values. Does security checks to ensure the parameter is on the card and then gets param

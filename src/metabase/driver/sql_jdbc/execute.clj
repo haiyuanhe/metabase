@@ -62,7 +62,9 @@
     [:write? {:optional true} [:maybe :boolean]]
     [:download? {:optional true} [:maybe :boolean]]
     ;; don't autoclose the connection
-    [:keep-open? {:optional true} [:maybe :boolean]]]])
+    [:keep-open? {:optional true} [:maybe :boolean]]
+    ;; query object for RLS parameters
+    [:query {:optional true} [:maybe :map]]]])
 
 (defmulti do-with-connection-with-options
   "Fetch a [[java.sql.Connection]] from a `driver`/`db-or-id-or-spec`, and invoke
@@ -361,7 +363,7 @@
   [driver                                                 :- :keyword
    db-or-id-or-spec
    ^Connection conn                                       :- (driver-api/instance-of-class Connection)
-   {:keys [^String session-timezone write?], :as options} :- ConnectionOptions]
+   {:keys [^String session-timezone write? query], :as options} :- ConnectionOptions]
   (when-let [db (cond
                   ;; id?
                   (integer? db-or-id-or-spec)
@@ -372,7 +374,26 @@
                   ;; otherwise it's a spec and we can't get the db
                   :else nil)]
     (set-role-if-supported! driver conn db)
-    (driver/set-database-used! driver conn db))
+    (driver/set-database-used! driver conn db)
+    ;; Set RLS parameters if available in the query
+    (when query
+      (when-let [rls-params (:qp/rls-params query)]
+        (try
+          (doseq [[param-name param-value] rls-params]
+            (let [var-name (str "metabase.rls." (name param-name))
+                  sql (format "SET SESSION %s = %s;" 
+                              var-name 
+                              (if (string? param-value)
+                                (format "'%s'" (str/replace param-value #"'" "''"))
+                                (str param-value)))]
+              (log/debugf "Setting RLS session variable: %s = %s" var-name param-value)
+              (with-open [stmt (.createStatement conn)]
+                (.execute stmt sql))))
+          (catch Throwable e
+            (log/errorf e "Failed to set RLS session variables: %s" (pr-str rls-params))
+            (throw (ex-info (tru "Failed to set RLS session variables")
+                            {:rls-params rls-params}
+                            e)))))))
   (when-not (recursive-connection?)
     (log/tracef "Setting default connection options with options %s" (pr-str options))
     (set-best-transaction-level! driver conn)

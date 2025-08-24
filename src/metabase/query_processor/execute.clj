@@ -5,6 +5,7 @@
    [metabase.query-processor.middleware.cache :as cache]
    [metabase.query-processor.middleware.enterprise :as qp.middleware.enterprise]
    [metabase.query-processor.middleware.permissions :as qp.perms]
+   [metabase.query-processor.middleware.rls :as qp.rls]
    [metabase.query-processor.middleware.update-used-cards :as update-used-cards]
    [metabase.query-processor.pipeline :as qp.pipeline]
    [metabase.query-processor.schema :as qp.schema]
@@ -49,6 +50,7 @@
     (f (f query rff)) -> (f query rff)"
   [#'qp.middleware.enterprise/swap-destination-db-middleware
    #'qp.middleware.enterprise/apply-impersonation-postprocessing-middleware
+   #'qp.rls/apply-rls-execution-middleware
    #'update-used-cards/update-used-cards!
    #'add-native-form-to-result-metadata
    #'add-preprocessed-query-to-result-metadata-for-userland-query

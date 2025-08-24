@@ -294,7 +294,7 @@
   options."
   [card-id :- ::lib.schema.id/card
    export-format
-   & {:keys [parameters constraints context dashboard-id dashcard-id middleware qp make-run ignore-cache]
+   & {:keys [parameters constraints context dashboard-id dashcard-id middleware qp make-run ignore-cache rls-params]
       :or   {constraints (qp.constraints/default-query-constraints)
              context     :question
              ;; param `make-run` can be used to control how the query is ran, e.g. if you need to customize the `context`
@@ -319,6 +319,7 @@
         runner     (make-run qp export-format)
         query      (-> (query-for-card card parameters constraints middleware {:dashboard-id dashboard-id})
                        (assoc :viz-settings merged-viz)
+                       (cond-> rls-params (assoc :rls-params rls-params))
                        (update :middleware (fn [middleware]
                                              (merge
                                               {:js-int-to-string? true, :ignore-cached-results? ignore-cache}

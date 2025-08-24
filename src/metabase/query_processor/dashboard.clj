@@ -164,7 +164,7 @@
 
   See [[metabase.query-processor.card/process-query-for-card]] for more information about the various parameters."
   {:arglists '([& {:keys [dashboard-id card-id dashcard-id export-format parameters ignore-cache constraints parameters middleware]}])}
-  [& {:keys [dashboard-id card-id dashcard-id parameters export-format]
+  [& {:keys [dashboard-id card-id dashcard-id parameters export-format rls-params]
       :or   {export-format :api}
       :as   options}]
   (span/with-span! {:name       "run-query-for-dashcard-async"
@@ -183,7 +183,8 @@
                             :context      :dashboard}
                            options
                            {:parameters   resolved-params
-                            :dashboard-id dashboard-id})]
+                            :dashboard-id dashboard-id
+                            :rls-params   rls-params})]
       (log/tracef "Running Query for Dashboard %d, Card %d, Dashcard %d with options\n%s"
                   dashboard-id card-id dashcard-id
                   (u/pprint-to-str options))

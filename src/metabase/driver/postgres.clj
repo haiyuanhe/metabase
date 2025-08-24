@@ -1190,6 +1190,39 @@
           "from table_privileges t"]))
        (filter #(or (:select %) (:update %) (:delete %) (:insert %)))))
 
+;;; ------------------------------------------------- RLS Session Variables --------------------------------------------------
+
+(defn- set-rls-session-variables
+  "Set RLS session variables on the PostgreSQL connection for Row Level Security.
+  These variables will be used by RLS policies to filter data based on user context."
+  [^java.sql.Connection conn rls-params]
+  (when (and (seq rls-params) (instance? java.sql.Connection conn))
+    (try
+      (doseq [[param-name param-value] rls-params]
+        (let [var-name (str "metabase.rls." (name param-name))
+              sql (format "SET SESSION %s = %s;" 
+                          var-name 
+                          (if (string? param-value)
+                            (format "'%s'" (str/replace param-value #"'" "''"))
+                            (str param-value)))]
+          (log/debugf "Setting RLS session variable: %s = %s" var-name param-value)
+          (with-open [stmt (.createStatement conn)]
+            (.execute stmt sql))))
+      (catch Throwable e
+        (log/errorf e "Failed to set RLS session variables: %s" (pr-str rls-params))
+        (throw (ex-info (tru "Failed to set RLS session variables")
+                        {:rls-params rls-params}
+                        e))))))
+
+(defmethod driver/set-role! :postgres
+  [driver conn role]
+  (let [sql (driver.sql/set-role-statement driver role)]
+    (with-open [stmt (.createStatement ^Connection conn)]
+      (.execute stmt sql)))
+  ;; After setting the role, also set RLS session variables if available
+  (when-let [rls-params (get (meta conn) :rls-params)]
+    (set-rls-session-variables conn rls-params)))
+
 ;;; ------------------------------------------------- User Impersonation --------------------------------------------------
 
 (defmethod driver.sql/set-role-statement :postgres

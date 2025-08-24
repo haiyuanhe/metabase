@@ -16,7 +16,7 @@
    ^{:clj-kondo/ignore [:discouraged-namespace]}
    [toucan2.core :as t2])
   (:import
-   (com.mchange.v2.c3p0 DataSources)
+   (com.mchange.v2.c3p0 ConnectionCustomizer DataSources)
    (javax.sql DataSource)
    (org.apache.logging.log4j Level)))
 
@@ -28,6 +28,62 @@
  [driver.settings
   jdbc-data-warehouse-unreturned-connection-timeout-seconds
   jdbc-data-warehouse-debug-unreturned-connection-stack-traces])
+
+;;; +----------------------------------------------------------------------------------------------------------------+
+;;; |                                              Connection Customizer                                              |
+;;; +----------------------------------------------------------------------------------------------------------------+
+
+(defn- postgres-connection? [^java.sql.Connection connection]
+  (.isWrapperFor connection org.postgresql.jdbc.PgConnection))
+
+(defn- cleanup-rls-session-variables [^java.sql.Connection connection]
+  "Clean up RLS session variables to prevent data leakage between tenants."
+  (when (postgres-connection? connection)
+    (try
+      (with-open [stmt (.createStatement connection)]
+        ;; Clear all known RLS session variables - this is more reliable than dynamic discovery
+        (let [rls-variables [
+                            "metabase.rls.user_id"
+                            "metabase.rls.company_id"
+                            "metabase.rls.org_id"
+                            "metabase.rls.role_id"
+                            "metabase.rls.department_id"
+                            "metabase.rls.region_id"
+                            "metabase.rls.business_unit_id"
+                            ]]
+          (doseq [var-name rls-variables]
+            (let [clear-sql (format "SELECT set_config('%s', NULL, false);" var-name)]
+              (.execute stmt clear-sql)
+              (log/debugf "Cleared RLS session variable: %s" var-name)))
+          (log/debugf "Cleaned up %d RLS session variables" (count rls-variables))))
+      (catch Throwable e
+        (log/warnf e "Failed to clean up RLS session variables: %s" (.getMessage e))))))
+
+(p/deftype+ DataWarehouseConnectionCustomizer []
+  ConnectionCustomizer
+  (onAcquire [_this connection _identity-token]
+    ;; Ensure clean state when connection is acquired
+    (cleanup-rls-session-variables connection))
+  (onCheckIn [_this connection _identity-token]
+    ;; Clean up RLS variables when connection is returned to pool
+    (cleanup-rls-session-variables connection))
+  (onCheckOut [_this connection _identity-token]
+    ;; Ensure clean state when connection is checked out
+    (cleanup-rls-session-variables connection))
+  (onDestroy [_this connection _identity-token]
+    ;; Clean up when connection is destroyed
+    (cleanup-rls-session-variables connection)))
+
+(defn- register-data-warehouse-customizer!
+  "Register the DataWarehouseConnectionCustomizer with c3p0 for data warehouse connections."
+  []
+  (let [field (doto (.getDeclaredField com.mchange.v2.c3p0.C3P0Registry "classNamesToConnectionCustomizers")
+                (.setAccessible true))]
+    (.put ^java.util.HashMap (.get field com.mchange.v2.c3p0.C3P0Registry)
+          (.getName DataWarehouseConnectionCustomizer) (.newInstance DataWarehouseConnectionCustomizer))))
+
+;; Register the customizer when the namespace is loaded
+(register-data-warehouse-customizer!)
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
 ;;; |                                                   Interface                                                    |
@@ -99,6 +155,8 @@
    "minPoolSize"                  0
    "initialPoolSize"              0
    "maxPoolSize"                  (driver.settings/jdbc-data-warehouse-max-connection-pool-size)
+   ;; Connection customizer to clean up RLS session variables and prevent data leakage between tenants
+   "connectionCustomizerClassName" (.getName DataWarehouseConnectionCustomizer)
    ;; [From dox] If true, an operation will be performed at every connection checkout to verify that the connection is
    ;; valid. [...] ;; Testing Connections in checkout is the simplest and most reliable form of Connection testing,
    ;; but for better performance, consider verifying connections periodically using `idleConnectionTestPeriod`. [...]

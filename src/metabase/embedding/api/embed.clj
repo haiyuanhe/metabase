@@ -26,6 +26,7 @@
    [metabase.query-processor.pivot :as qp.pivot]
    [metabase.query-processor.schema :as qp.schema]
    [metabase.request.core :as request]
+   [metabase.rls.context :as rls]
    [metabase.tiles.api :as api.tiles]
    [metabase.util :as u]
    [metabase.util.json :as json]
@@ -63,6 +64,12 @@
   [message]
   (translate-token-ids (embedding.jwt/unsign message)))
 
+(defn- with-rls [unsigned-token f]
+  (let [params (embedding.jwt/get-in-unsigned-token-or-throw unsigned-token [:params])
+        rls-params (rls/validate-rls-params params)]
+    (binding [rls/*rls-context* rls-params]
+      (f))))
+
 ;;; ------------------------------------------- /api/embed/card endpoints --------------------------------------------
 
 (api.macros/defendpoint :get "/card/:token"
@@ -74,9 +81,11 @@
   [{:keys [token]} :- [:map
                        [:token string?]]]
   (let [unsigned (unsign-and-translate-ids token)]
-    (api.embed.common/check-embedding-enabled-for-card (embedding.jwt/get-in-unsigned-token-or-throw unsigned [:resource :question]))
-    (u/prog1 (api.embed.common/card-for-unsigned-token unsigned, :constraints [:enable_embedding true])
-      (events/publish-event! :event/card-read {:object-id (:id <>), :user-id api/*current-user-id*, :context :question}))))
+    (with-rls unsigned
+      (fn []
+        (api.embed.common/check-embedding-enabled-for-card (embedding.jwt/get-in-unsigned-token-or-throw unsigned [:resource :question]))
+        (u/prog1 (api.embed.common/card-for-unsigned-token (update unsigned :params rls/strip-rls-params), :constraints [:enable_embedding true])
+          (events/publish-event! :event/card-read {:object-id (:id <>), :user-id api/*current-user-id*, :context :question}))))))
 
 (defn ^:private run-query-for-unsigned-token-async
   "Run the query belonging to Card identified by `unsigned-token`. Checks that embedding is enabled both globally and
@@ -85,17 +94,19 @@
                                                 :or   {constraints (qp.constraints/default-query-constraints)
                                                        qp          qp.card/process-query-for-card-default-qp}
                                                 :as   options}]
-  (let [card-id (embedding.jwt/get-in-unsigned-token-or-throw unsigned-token [:resource :question])]
-    (api.embed.common/check-embedding-enabled-for-card card-id)
-    (api.embed.common/process-query-for-card-with-params
-     :export-format     export-format
-     :card-id           card-id
-     :token-params      (embedding.jwt/get-in-unsigned-token-or-throw unsigned-token [:params])
-     :embedding-params  (t2/select-one-fn :embedding_params :model/Card :id card-id)
-     :query-params      (api.embed.common/parse-query-params (dissoc query-params :format_rows :pivot_results))
-     :qp                qp
-     :constraints       constraints
-     :options           options)))
+  (with-rls unsigned-token
+    (fn []
+      (let [card-id (embedding.jwt/get-in-unsigned-token-or-throw unsigned-token [:resource :question])]
+        (api.embed.common/check-embedding-enabled-for-card card-id)
+        (api.embed.common/process-query-for-card-with-params
+         :export-format     export-format
+         :card-id           card-id
+         :token-params      (rls/strip-rls-params (embedding.jwt/get-in-unsigned-token-or-throw unsigned-token [:params]))
+         :embedding-params  (t2/select-one-fn :embedding_params :model/Card :id card-id)
+         :query-params      (api.embed.common/parse-query-params (rls/strip-rls-params (dissoc query-params :format_rows :pivot_results)))
+         :qp                qp
+         :constraints       constraints
+         :options           options)))))
 
 (api.macros/defendpoint :get "/card/:token/query"
   "Fetch the results of running a Card using a JSON Web Token signed with the `embedding-secret-key`.
@@ -140,9 +151,11 @@
   [{:keys [token]} :- [:map
                        [:token string?]]]
   (let [unsigned (unsign-and-translate-ids token)]
-    (api.embed.common/check-embedding-enabled-for-dashboard (embedding.jwt/get-in-unsigned-token-or-throw unsigned [:resource :dashboard]))
-    (u/prog1 (api.embed.common/dashboard-for-unsigned-token unsigned, :constraints [:enable_embedding true])
-      (events/publish-event! :event/dashboard-read {:object-id (:id <>), :user-id api/*current-user-id*}))))
+    (with-rls unsigned
+      (fn []
+        (api.embed.common/check-embedding-enabled-for-dashboard (embedding.jwt/get-in-unsigned-token-or-throw unsigned [:resource :dashboard]))
+        (u/prog1 (api.embed.common/dashboard-for-unsigned-token (update unsigned :params rls/strip-rls-params), :constraints [:enable_embedding true])
+          (events/publish-event! :event/dashboard-read {:object-id (:id <>), :user-id api/*current-user-id*}))))))
 
 (defn- process-query-for-dashcard-with-signed-token
   "Fetch the results of running a Card belonging to a Dashboard using a JSON Web Token signed with the
@@ -160,20 +173,22 @@
    & {:keys [constraints qp middleware]
       :or   {constraints (qp.constraints/default-query-constraints)
              qp          qp.card/process-query-for-card-default-qp}}]
-  (let [unsigned-token (unsign-and-translate-ids token)
-        dashboard-id   (embedding.jwt/get-in-unsigned-token-or-throw unsigned-token [:resource :dashboard])]
-    (api.embed.common/check-embedding-enabled-for-dashboard dashboard-id)
-    (api.embed.common/process-query-for-dashcard
-     :export-format    export-format
-     :dashboard-id     dashboard-id
-     :dashcard-id      dashcard-id
-     :card-id          card-id
-     :embedding-params (t2/select-one-fn :embedding_params :model/Dashboard :id dashboard-id)
-     :token-params     (embedding.jwt/get-in-unsigned-token-or-throw unsigned-token [:params])
-     :query-params     (api.embed.common/parse-query-params (dissoc query-params :format_rows :pivot_results))
-     :constraints      constraints
-     :qp               qp
-     :middleware       middleware)))
+  (let [unsigned-token (unsign-and-translate-ids token)]
+    (with-rls unsigned-token
+      (fn []
+        (let [dashboard-id   (embedding.jwt/get-in-unsigned-token-or-throw unsigned-token [:resource :dashboard])]
+          (api.embed.common/check-embedding-enabled-for-dashboard dashboard-id)
+          (api.embed.common/process-query-for-dashcard
+           :export-format    export-format
+           :dashboard-id     dashboard-id
+           :dashcard-id      dashcard-id
+           :card-id          card-id
+           :embedding-params (t2/select-one-fn :embedding_params :model/Dashboard :id dashboard-id)
+           :token-params     (rls/strip-rls-params (embedding.jwt/get-in-unsigned-token-or-throw unsigned-token [:params]))
+           :query-params     (api.embed.common/parse-query-params (rls/strip-rls-params (dissoc query-params :format_rows :pivot_results)))
+           :constraints      constraints
+           :qp               qp
+           :middleware       middleware))))))
 
 (api.macros/defendpoint :get "/dashboard/:token/dashcard/:dashcard-id/card/:card-id"
   "Fetch the results of running a Card belonging to a Dashboard using a JSON Web Token signed with the
@@ -262,10 +277,10 @@
 
 (api.macros/defendpoint :get "/card/:token/params/:param-key/search/:prefix"
   "Embedded version of chain filter search endpoint."
-  [{:keys [token param-key prefix]}] :- [:map
+  [{:keys [token param-key prefix]} :- [:map
                                          [:token     string?]
                                          [:param-key string?]
-                                         [:prefix    string?]]
+                                         [:prefix    string?]]]
   (let [unsigned (unsign-and-translate-ids token)
         card-id  (embedding.jwt/get-in-unsigned-token-or-throw unsigned [:resource :question])
         card     (t2/select-one :model/Card :id card-id)]

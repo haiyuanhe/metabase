@@ -18,6 +18,7 @@
    [metabase.driver.sql-jdbc.execute.diagnostic :as sql-jdbc.execute.diagnostic]
    [metabase.driver.sql-jdbc.execute.old-impl :as sql-jdbc.execute.old]
    [metabase.driver.sql-jdbc.sync.interface :as sql-jdbc.sync.interface]
+   [metabase.query-processor.middleware.rls :as rls]
    [metabase.lib.schema.info :as lib.schema.info]
    [metabase.premium-features.core :refer [defenterprise]]
    [metabase.util :as u]
@@ -775,7 +776,21 @@
      {:session-timezone (driver-api/report-timezone-id-if-supported driver (driver-api/database (driver-api/metadata-provider)))
       :download? (download? (-> outer-query :info :context))}
      (fn [^Connection conn]
-       (with-open [stmt          (statement-or-prepared-statement driver conn sql params (driver-api/canceled-chan))
+      ;; Apply RLS context if present (Postgres supports SET LOCAL inside a transaction).
+       (let [rls-ctx (rls/get-rls-context)
+             setup-sqls (rls/wrap-sql-with-rls rls-ctx)]
+        (when (seq setup-sqls)
+           (try
+            (log/info "SQL-EXEC: RLS context detected" {:rls rls-ctx :statements setup-sqls})
+             (.setAutoCommit conn false)
+             (with-open [s (.createStatement conn)]
+               (.execute s "BEGIN;")
+               (doseq [stmt-sql setup-sqls]
+                 (log/debug "SQL-EXEC: Executing RLS setup statement" {:statement stmt-sql})
+                 (.execute s stmt-sql)))
+             (catch Throwable e
+              (log/warn e "Failed applying RLS setup; proceeding without RLS"))))
+         (with-open [stmt          (statement-or-prepared-statement driver conn sql params (driver-api/canceled-chan))
                    ^ResultSet rs (try
                                    (execute-statement-or-prepared-statement! driver stmt max-rows params sql)
                                    (catch Throwable e
@@ -785,24 +800,33 @@
                                                       :params params
                                                       :type   driver-api/qp.error-type.invalid-query}
                                                      e))))]
-         (let [rsmeta           (.getMetaData rs)
-               results-metadata {:cols (column-metadata driver rsmeta)}]
-           (try (respond results-metadata (reducible-rows driver rs rsmeta (driver-api/canceled-chan)))
-                ;; Following cancels the statment on the dbms side.
-                ;; It avoids blocking `.close` call, in case we reduced the results subset eg. by means of
-                ;; [[metabase.query-processor.middleware.limit/limit-xform]] middleware, while statment is still
-                ;; in progress. This problem was encountered on Redshift. For details see the issue #39018.
-                ;; It also handles situation where query is canceled through [[driver-api/canceled-chan]] (#41448).
-                (finally
-                  ;; TODO: Following `when` is in place just to find out if vertica is flaking because of cancelations.
-                  ;;       It should be removed afterwards!
-                  (when-not (= :vertica driver)
-                    (try (.cancel stmt)
-                         (catch SQLFeatureNotSupportedException _
-                           (log/warnf "Statemet's `.cancel` method is not supported by the `%s` driver."
-                                      (name driver)))
-                         (catch Throwable _
-                           (log/warn "Statement cancelation failed."))))))))))))
+           (let [rsmeta           (.getMetaData rs)
+                 results-metadata {:cols (column-metadata driver rsmeta)}]
+             (try (respond results-metadata (reducible-rows driver rs rsmeta (driver-api/canceled-chan)))
+                  ;; Following cancels the statment on the dbms side.
+                  ;; It avoids blocking `.close` call, in case we reduced the results subset eg. by means of
+                  ;; [[metabase.query-processor.middleware.limit/limit-xform]] middleware, while statment is still
+                  ;; in progress. This problem was encountered on Redshift. For details see the issue #39018.
+                  ;; It also handles situation where query is canceled through [[driver-api/canceled-chan]] (#41448).
+                  (finally
+                    (when (seq setup-sqls)
+                      (try
+                        (with-open [s (.createStatement conn)]
+                          (.execute s "COMMIT;")
+                          (log/info "SQL-EXEC: RLS context applied successfully"))
+                        (catch Throwable e
+                          (log/warn e "SQL-EXEC: Failed to commit RLS transaction; attempting rollback")
+                          (try (.rollback conn) (catch Throwable _))))
+                      (try (.setAutoCommit conn true) (catch Throwable _)))
+                    ;; TODO: Following `when` is in place just to find out if vertica is flaking because of cancelations.
+                    ;;       It should be removed afterwards!
+                    (when-not (= :vertica driver)
+                      (try (.cancel stmt)
+                           (catch SQLFeatureNotSupportedException _
+                             (log/warnf "Statemet's `.cancel` method is not supported by the `%s` driver."
+                                        (name driver)))
+                           (catch Throwable _
+                             (log/warn "Statement cancelation failed.")))))))))))))
 
 (defn reducible-query
   "Returns a reducible collection of rows as maps from `db` and a given SQL query. This is similar to [[jdbc/reducible-query]] but reuses the

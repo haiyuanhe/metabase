@@ -22,6 +22,7 @@
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
    [metabase.util.malli.schema :as ms]
+   [metabase.query-processor.middleware.rls :as rls]
    [toucan2.core :as t2]))
 
 (set! *warn-on-reflection* true)
@@ -164,12 +165,26 @@
   [object-embedding-params :- ms/EmbeddingParams
    token-params            :- [:map-of :keyword :any]
    user-params             :- [:map-of :keyword :any]]
-  (check-param-sets object-embedding-params
-                    (m/filter-vals valid-param-value? token-params)
-                    (m/filter-vals valid-param-value? user-params))
+  ;; RLS runtime keys are not part of embed param whitelist; exclude them from validation
+  (let [rls-key? (fn [k]
+                   (when k
+                     (str/starts-with? (name k) "rls_")))
+        sanitize (fn [m]
+                   (->> m
+                        (remove (comp rls-key? key))
+                        (into {})))
+        token-params* (m/filter-vals valid-param-value? (sanitize token-params))
+        user-params*  (m/filter-vals valid-param-value? (sanitize user-params))]
+    (check-param-sets object-embedding-params token-params* user-params*))
   ;; ok, everything checks out, now return the merged params map,
   ;; but first turn empty lists into nil
   (-> (merge user-params token-params)
+      ;; exclude RLS runtime keys from merged params forwarded to dashboard/card param resolution
+      (as-> merged
+        (into {}
+              (remove (fn [[k _]]
+                        (str/starts-with? (name k) "rls_"))
+                      merged)))
       (update-vals (fn [v]
                      (if (and (not (string? v)) (seqable? v))
                        (not-empty v)
@@ -306,13 +321,19 @@
       :or   {qp qp.card/process-query-for-card-default-qp}}]
   {:pre [(integer? card-id) (u/maybe? map? embedding-params) (map? token-params) (map? query-params)]}
   (let [merged-slug->value (validate-and-merge-params embedding-params token-params (normalize-query-params query-params))
-        parameters         (apply-slug->value (resolve-card-parameters card-id) merged-slug->value)]
-    (m/mapply api.public/process-query-for-card-with-id
-              card-id export-format parameters
-              :context     :embedded-question
-              :constraints constraints
-              :qp          qp
-              options)))
+        parameters         (apply-slug->value (resolve-card-parameters card-id) merged-slug->value)
+        rls-context        (-> (merge (normalize-query-params query-params) token-params)
+                               (select-keys [:rls_user_id :rls_company_id :rls_department_id :rls_region_id])
+                               not-empty)]
+    (binding [rls/*rls-context* rls-context]
+      (when (rls/get-rls-context)
+        (log/info "EMBED: RLS parameters extracted" (rls/get-rls-context)))
+      (m/mapply api.public/process-query-for-card-with-id
+                card-id export-format parameters
+                :context     :embedded-question
+                :constraints constraints
+                :qp          qp
+                options))))
 
 (defn unsigned-token->card-id
   "Get the Card ID from an unsigned token."
@@ -384,17 +405,23 @@
   {:pre [(integer? dashboard-id) (integer? dashcard-id) (integer? card-id) (u/maybe? map? embedding-params)
          (map? token-params) (map? query-params)]}
   (let [slug->value (validate-and-merge-params embedding-params token-params (normalize-query-params query-params))
-        parameters  (resolve-dashboard-parameters dashboard-id slug->value)]
-    (api.public/process-query-for-dashcard
-     :dashboard-id  dashboard-id
-     :card-id       card-id
-     :dashcard-id   dashcard-id
-     :export-format export-format
-     :parameters    parameters
-     :qp            qp
-     :context       (get-embed-dashboard-context export-format)
-     :constraints   constraints
-     :middleware    middleware)))
+        parameters  (resolve-dashboard-parameters dashboard-id slug->value)
+        rls-context (-> (merge (normalize-query-params query-params) token-params)
+                        (select-keys [:rls_user_id :rls_company_id :rls_department_id :rls_region_id])
+                        not-empty)]
+    (binding [rls/*rls-context* rls-context]
+      (when (rls/get-rls-context)
+        (log/info "EMBED: RLS parameters extracted" (rls/get-rls-context)))
+      (api.public/process-query-for-dashcard
+       :dashboard-id  dashboard-id
+       :card-id       card-id
+       :dashcard-id   dashcard-id
+       :export-format export-format
+       :parameters    parameters
+       :qp            qp
+       :context       (get-embed-dashboard-context export-format)
+       :constraints   constraints
+       :middleware    middleware))))
 
 (defn card-param-values
   "Search for card parameter values. Does security checks to ensure the parameter is on the card and then gets param
